@@ -13,7 +13,6 @@ SAO_PAULO_TZ = timezone(timedelta(hours=-3))
 MAX_TELEGRAM_MESSAGE_LENGTH = 3800
 SOURCE_PAGES = (
     "https://www.melhoresdestinos.com.br/passagens-aereas",
-    "https://www.melhoresdestinos.com.br/passagens-aereas/promocoes-passagens",
     "https://passageirodeprimeira.com/categorias/passagens-aereas/",
 )
 KEYWORD_GROUPS = (
@@ -137,14 +136,20 @@ def collect_offers() -> list[OfferItem]:
     seen_urls = set()
 
     for page_url in SOURCE_PAGES:
-        listing_html = fetch_html(session, page_url)
+        try:
+            listing_html = fetch_html(session, page_url)
+        except requests.RequestException:
+            continue
         for article_url, title in extract_links_from_listing(listing_html, page_url):
             if article_url in seen_urls:
                 continue
             if not matches_route(title):
                 continue
 
-            article_html = fetch_html(session, article_url)
+            try:
+                article_html = fetch_html(session, article_url)
+            except requests.RequestException:
+                continue
             summary = extract_summary(article_html)
             combined_text = f"{title} {summary}"
             if not matches_route(combined_text):
