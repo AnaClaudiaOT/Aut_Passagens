@@ -23,11 +23,6 @@ jobs:
 
       - name: Run flight monitor
         env:
-          AMADEUS_CLIENT_ID: ${{ secrets.AMADEUS_CLIENT_ID }}
-          AMADEUS_CLIENT_SECRET: ${{ secrets.AMADEUS_CLIENT_SECRET }}
-          AMADEUS_ENV: ${{ secrets.AMADEUS_ENV }}
-          DEAL_THRESHOLD_BRL: ${{ secrets.DEAL_THRESHOLD_BRL }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: python src/flight_monitor.py
-

@@ -1,188 +1,193 @@
 import os
+import re
+import unicodedata
 from dataclasses import dataclass
-from datetime import date, datetime, timedelta, timezone
-from decimal import Decimal, InvalidOperation
-from typing import Iterable
+from datetime import datetime, timedelta, timezone
 
 import requests
+from bs4 import BeautifulSoup
 
 
 REQUEST_TIMEOUT = 30
 SAO_PAULO_TZ = timezone(timedelta(hours=-3))
-ORIGINS = {
-    "GRU": "Sao Paulo / Guarulhos",
-    "CGH": "Sao Paulo / Congonhas",
-    "VCP": "Campinas / Viracopos",
-}
-DESTINATION = "GYN"
-DESTINATION_LABEL = "Goiania"
-DEFAULT_MAX_RESULTS_PER_ORIGIN = 3
-DEFAULT_DEAL_THRESHOLD_BRL = Decimal("550")
 MAX_TELEGRAM_MESSAGE_LENGTH = 3800
+SOURCE_PAGES = (
+    "https://www.melhoresdestinos.com.br/passagens-aereas",
+    "https://www.melhoresdestinos.com.br/passagens-aereas/promocoes-passagens",
+    "https://passageirodeprimeira.com/categorias/passagens-aereas/",
+)
+KEYWORD_GROUPS = (
+    ("goiania", "gyn"),
+    ("sao paulo", "gru", "cgh"),
+    ("campinas", "vcp", "viracopos"),
+)
+USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/135.0 Safari/537.36"
+)
 
 
 @dataclass(frozen=True)
-class FareOption:
-    origin_code: str
-    origin_label: str
-    destination_code: str
-    departure_date: str
-    return_date: str | None
-    total_brl: Decimal
-    one_way: bool
-    deep_link: str | None
-
-    @property
-    def trip_type_label(self) -> str:
-        return "Ida" if self.one_way else "Ida e volta"
+class OfferItem:
+    title: str
+    url: str
+    source: str
+    published_at: str
+    summary: str
 
 
-def get_env(name: str, default: str | None = None) -> str:
-    value = os.getenv(name, default)
-    if value is None or not str(value).strip():
+def normalize_text(text: str) -> str:
+    normalized = unicodedata.normalize("NFKD", text)
+    ascii_text = normalized.encode("ascii", "ignore").decode("ascii")
+    return ascii_text.lower()
+
+
+def get_env(name: str) -> str:
+    value = os.getenv(name)
+    if value is None or not value.strip():
         raise RuntimeError(f"Environment variable {name} is required.")
-    return str(value).strip()
-
-
-def get_api_base() -> str:
-    env = os.getenv("AMADEUS_ENV", "test").strip().lower()
-    if env == "production":
-        return "https://api.amadeus.com"
-    return "https://test.api.amadeus.com"
-
-
-def get_access_token(session: requests.Session) -> str:
-    client_id = get_env("AMADEUS_CLIENT_ID")
-    client_secret = get_env("AMADEUS_CLIENT_SECRET")
-    response = session.post(
-        f"{get_api_base()}/v1/security/oauth2/token",
-        data={
-            "grant_type": "client_credentials",
-            "client_id": client_id,
-            "client_secret": client_secret,
-        },
-        timeout=REQUEST_TIMEOUT,
-    )
-    response.raise_for_status()
-    payload = response.json()
-    return payload["access_token"]
+    return value.strip()
 
 
 def build_session() -> requests.Session:
     session = requests.Session()
-    session.headers.update({"User-Agent": "goiania-flight-monitor/1.0"})
+    session.headers.update({"User-Agent": USER_AGENT})
     return session
 
 
-def parse_decimal(value: str) -> Decimal:
-    try:
-        return Decimal(value)
-    except (InvalidOperation, TypeError) as exc:
-        raise RuntimeError(f"Invalid decimal value: {value}") from exc
-
-
-def search_round_trip_fares(session: requests.Session, token: str, origin_code: str) -> list[FareOption]:
-    start_date = date.today() + timedelta(days=1)
-    end_date = start_date + timedelta(days=89)
-    response = session.get(
-        f"{get_api_base()}/v1/shopping/flight-dates",
-        headers={"Authorization": f"Bearer {token}"},
-        params={
-            "origin": origin_code,
-            "destination": DESTINATION,
-            "departureDate": f"{start_date.isoformat()},{end_date.isoformat()}",
-            "oneWay": "false",
-            "duration": "2,7",
-            "currencyCode": "BRL",
-            "nonStop": "false",
-            "viewBy": "DATE",
-        },
-        timeout=REQUEST_TIMEOUT,
-    )
+def fetch_html(session: requests.Session, url: str) -> str:
+    response = session.get(url, timeout=REQUEST_TIMEOUT)
     response.raise_for_status()
-    payload = response.json()
+    return response.text
 
-    options: list[FareOption] = []
-    for item in payload.get("data", []):
-        price = item.get("price", {}).get("total")
-        departure_date = item.get("departureDate")
-        return_date = item.get("returnDate")
-        if not price or not departure_date:
+
+def extract_links_from_listing(html: str, base_url: str) -> list[tuple[str, str]]:
+    soup = BeautifulSoup(html, "html.parser")
+    links: list[tuple[str, str]] = []
+    seen = set()
+    for anchor in soup.find_all("a", href=True):
+        href = anchor.get("href", "").strip()
+        title = " ".join(anchor.get_text(" ", strip=True).split())
+        if not href.startswith("http"):
             continue
-        options.append(
-            FareOption(
-                origin_code=origin_code,
-                origin_label=ORIGINS[origin_code],
-                destination_code=DESTINATION,
-                departure_date=departure_date,
-                return_date=return_date,
-                total_brl=parse_decimal(price),
-                one_way=False,
-                deep_link=item.get("links", {}).get("flightOffers"),
+        if href == base_url or len(title) < 12:
+            continue
+        item = (href, title)
+        if item in seen:
+            continue
+        seen.add(item)
+        links.append(item)
+    return links
+
+
+def matches_route(text: str) -> bool:
+    normalized = normalize_text(text)
+    has_destination = any(keyword in normalized for keyword in KEYWORD_GROUPS[0])
+    has_origin = any(keyword in normalized for keyword in KEYWORD_GROUPS[1] + KEYWORD_GROUPS[2])
+    return has_destination and has_origin
+
+
+def extract_summary(html: str) -> str:
+    soup = BeautifulSoup(html, "html.parser")
+    snippets: list[str] = []
+    for tag in soup.find_all(["p", "li"]):
+        text = " ".join(tag.get_text(" ", strip=True).split())
+        if len(text) < 50:
+            continue
+        snippets.append(text)
+        if len(snippets) == 2:
+            break
+    return " ".join(snippets)
+
+
+def extract_published_at(html: str) -> str:
+    soup = BeautifulSoup(html, "html.parser")
+    for attr in ("article:published_time", "og:updated_time"):
+        tag = soup.find("meta", attrs={"property": attr})
+        if tag and tag.get("content"):
+            return format_datetime(tag["content"])
+    for attr in ("datePublished", "dateModified"):
+        tag = soup.find("meta", attrs={"itemprop": attr})
+        if tag and tag.get("content"):
+            return format_datetime(tag["content"])
+    time_tag = soup.find("time")
+    if time_tag and time_tag.get("datetime"):
+        return format_datetime(time_tag["datetime"])
+    text = normalize_text(soup.get_text(" ", strip=True))
+    match = re.search(r"(\d{2}/\d{2}/\d{4}\s+as\s+\d{1,2}:\d{2})", text)
+    if match:
+        return match.group(1)
+    return "Data nao identificada"
+
+
+def format_datetime(value: str) -> str:
+    try:
+        iso_value = value.replace("Z", "+00:00")
+        parsed = datetime.fromisoformat(iso_value)
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=SAO_PAULO_TZ)
+        return parsed.astimezone(SAO_PAULO_TZ).strftime("%d/%m/%Y %H:%M")
+    except ValueError:
+        return value
+
+
+def collect_offers() -> list[OfferItem]:
+    session = build_session()
+    results: list[OfferItem] = []
+    seen_urls = set()
+
+    for page_url in SOURCE_PAGES:
+        listing_html = fetch_html(session, page_url)
+        for article_url, title in extract_links_from_listing(listing_html, page_url):
+            if article_url in seen_urls:
+                continue
+            if not matches_route(title):
+                continue
+
+            article_html = fetch_html(session, article_url)
+            summary = extract_summary(article_html)
+            combined_text = f"{title} {summary}"
+            if not matches_route(combined_text):
+                continue
+
+            results.append(
+                OfferItem(
+                    title=title,
+                    url=article_url,
+                    source=page_url,
+                    published_at=extract_published_at(article_html),
+                    summary=summary,
+                )
             )
-        )
+            seen_urls.add(article_url)
 
-    options.sort(key=lambda item: item.total_brl)
-    max_results = int(os.getenv("MAX_RESULTS_PER_ORIGIN", str(DEFAULT_MAX_RESULTS_PER_ORIGIN)))
-    return options[:max_results]
+    return results
 
 
-def format_money(value: Decimal) -> str:
-    normalized = f"{value:.2f}"
-    integer_part, decimal_part = normalized.split(".")
-    integer_with_separator = ""
-    for index, char in enumerate(reversed(integer_part)):
-        if index and index % 3 == 0:
-            integer_with_separator = "." + integer_with_separator
-        integer_with_separator = char + integer_with_separator
-    return f"R$ {integer_with_separator},{decimal_part}"
-
-
-def format_date(value: str) -> str:
-    parsed = datetime.strptime(value, "%Y-%m-%d")
-    return parsed.strftime("%d/%m/%Y")
-
-
-def build_report(options_by_origin: dict[str, list[FareOption]]) -> str:
+def build_report(items: list[OfferItem]) -> str:
     run_time = datetime.now(SAO_PAULO_TZ).strftime("%d/%m/%Y %H:%M")
-    deal_threshold = parse_decimal(os.getenv("DEAL_THRESHOLD_BRL", str(DEFAULT_DEAL_THRESHOLD_BRL)))
-    all_options = [option for options in options_by_origin.values() for option in options]
-
     lines = [
-        f"Monitor de passagens para {DESTINATION_LABEL} executado em {run_time}",
-        "Janela pesquisada: proximos 90 dias",
+        f"Monitor Goiania executado em {run_time}",
+        "Escopo: ofertas e conteudos publicos sobre voos para Goiania saindo de Sao Paulo ou Campinas",
         "",
     ]
 
-    if not all_options:
-        lines.append("Nenhuma tarifa foi encontrada nesta execucao.")
+    if not items:
+        lines.append("Nenhum conteudo relevante foi encontrado nas fontes monitoradas nesta execucao.")
+        lines.append("Fontes verificadas: Melhores Destinos e Passageiro de Primeira.")
         return "\n".join(lines)
 
-    best_option = min(all_options, key=lambda item: item.total_brl)
-    lines.extend(
-        [
-            "Melhor tarifa do momento:",
-            f"{best_option.origin_code} -> {best_option.destination_code} | {best_option.trip_type_label} | {format_money(best_option.total_brl)}",
-            f"Datas: {format_date(best_option.departure_date)} a {format_date(best_option.return_date)}",
-        ]
-    )
-    if best_option.total_brl <= deal_threshold:
-        lines.append(f"Alerta: abaixo do limite configurado de {format_money(deal_threshold)}")
-    if best_option.deep_link:
-        lines.append(f"Link: {best_option.deep_link}")
-
-    for origin_code, options in options_by_origin.items():
-        lines.extend(["", f"Top tarifas saindo de {ORIGINS[origin_code]}:"])
-        if not options:
-            lines.append("Nenhuma tarifa encontrada.")
-            continue
-        for option in options:
-            lines.append(
-                f"- {format_money(option.total_brl)} | {format_date(option.departure_date)} a {format_date(option.return_date)}"
-            )
-            if option.deep_link:
-                lines.append(f"  {option.deep_link}")
-
+    lines.append(f"Itens encontrados: {len(items)}")
+    for item in items:
+        lines.extend(
+            [
+                "",
+                f"Titulo: {item.title}",
+                f"Publicado em: {item.published_at}",
+                f"Resumo: {item.summary or 'Resumo nao encontrado'}",
+                f"Link: {item.url}",
+            ]
+        )
     return "\n".join(lines)
 
 
@@ -191,19 +196,19 @@ def split_text(text: str, max_length: int = MAX_TELEGRAM_MESSAGE_LENGTH) -> list
         return [text]
 
     chunks: list[str] = []
-    current = []
+    current_lines: list[str] = []
     current_length = 0
     for line in text.splitlines():
         line_length = len(line) + 1
-        if current and current_length + line_length > max_length:
-            chunks.append("\n".join(current))
-            current = [line]
+        if current_lines and current_length + line_length > max_length:
+            chunks.append("\n".join(current_lines))
+            current_lines = [line]
             current_length = line_length
-            continue
-        current.append(line)
-        current_length += line_length
-    if current:
-        chunks.append("\n".join(current))
+        else:
+            current_lines.append(line)
+            current_length += line_length
+    if current_lines:
+        chunks.append("\n".join(current_lines))
     return chunks
 
 
@@ -211,39 +216,23 @@ def send_telegram_message(session: requests.Session, text: str) -> None:
     token = get_env("TELEGRAM_BOT_TOKEN")
     chat_id = get_env("TELEGRAM_CHAT_ID")
     api_url = f"https://api.telegram.org/bot{token}/sendMessage"
-
     for chunk in split_text(text):
         response = session.post(
             api_url,
-            json={
-                "chat_id": chat_id,
-                "text": chunk,
-                "disable_web_page_preview": True,
-            },
+            json={"chat_id": chat_id, "text": chunk, "disable_web_page_preview": True},
             timeout=REQUEST_TIMEOUT,
         )
         response.raise_for_status()
 
 
-def monitor() -> dict[str, list[FareOption]]:
-    session = build_session()
-    token = get_access_token(session)
-    options_by_origin: dict[str, list[FareOption]] = {}
-    for origin_code in ORIGINS:
-        options_by_origin[origin_code] = search_round_trip_fares(session, token, origin_code)
-    return options_by_origin
-
-
 def main() -> int:
-    options_by_origin = monitor()
     session = build_session()
-    report = build_report(options_by_origin)
+    items = collect_offers()
+    report = build_report(items)
     send_telegram_message(session, report)
-    total_options = sum(len(options) for options in options_by_origin.values())
-    print(f"Sent report with {total_options} fare options.")
+    print(f"Sent report with {len(items)} matched item(s).")
     return 0
 
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

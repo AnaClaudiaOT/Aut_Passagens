@@ -1,6 +1,6 @@
 # Monitor de passagens para Goiania no Telegram
 
-Este projeto consulta tarifas para `GYN` saindo de:
+Este projeto monitora conteudos e ofertas publicas relacionados a passagens para Goiania saindo de:
 
 - `GRU`
 - `CGH`
@@ -10,13 +10,13 @@ Ele roda no GitHub Actions todos os dias as `09:00` e `21:00` no horario de Sao 
 
 ## Como funciona
 
-O monitor usa a API oficial da Amadeus para buscar as menores tarifas de ida e volta nos proximos 90 dias, com estadia entre 2 e 7 dias.
+O monitor consulta paginas publicas de conteudo e promocoes de viagem e procura posts relacionados a Goiania com origem em Sao Paulo ou Campinas.
 
 Em cada execucao, ele envia:
 
-- a melhor tarifa geral encontrada
-- as melhores tarifas por aeroporto de origem
-- um destaque quando o preco ficar abaixo do limite configurado
+- um resumo dos itens encontrados
+- titulo, horario publicado, resumo e link
+- uma mensagem de status mesmo quando nada relevante for encontrado
 
 ## Requisitos
 
@@ -24,37 +24,13 @@ Voce vai precisar de:
 
 - um bot no Telegram
 - um repositorio no GitHub
-- uma conta no Amadeus for Developers
-
-## Criando as credenciais da Amadeus
-
-1. Acesse [Amadeus for Developers](https://developers.amadeus.com/).
-2. Crie uma conta.
-3. Crie uma nova aplicacao.
-4. Copie o `API Key` e o `API Secret`.
-
-Esses valores serao usados como:
-
-- `AMADEUS_CLIENT_ID`
-- `AMADEUS_CLIENT_SECRET`
-
-O projeto usa por padrao o ambiente `test`. Se voce quiser usar producao, configure `AMADEUS_ENV=production`.
 
 ## Secrets do GitHub
 
 No repositorio, crie estes secrets em `Settings -> Secrets and variables -> Actions`:
 
-- `AMADEUS_CLIENT_ID`
-- `AMADEUS_CLIENT_SECRET`
-- `AMADEUS_ENV`
-- `DEAL_THRESHOLD_BRL`
 - `TELEGRAM_BOT_TOKEN`
 - `TELEGRAM_CHAT_ID`
-
-Valores sugeridos:
-
-- `AMADEUS_ENV`: `test`
-- `DEAL_THRESHOLD_BRL`: `550`
 
 ## Estrutura
 
@@ -86,4 +62,5 @@ git push -u origin main
 
 - O cron do GitHub usa UTC. O horario configurado no workflow corresponde a `09:00` e `21:00` em Sao Paulo.
 - O GitHub Actions pode ter pequeno atraso em horarios muito concorridos.
-- O ambiente `test` da Amadeus usa dados de cache, entao os valores sao bons para monitoramento, mas nao substituem validacao final no site da companhia ou agregador.
+- Esta versao usa fontes publicas e palavras-chave, entao funciona como radar simples de oportunidades e conteudos, nao como buscador oficial de tarifas em tempo real.
+- Se as fontes mudarem a estrutura do site, pode ser necessario ajustar o parser.
